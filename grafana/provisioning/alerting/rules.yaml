@@ -1,0 +1,301 @@
+apiVersion: 1
+
+groups:
+  - orgId: 1
+    name: flow-monitoring-alerts
+    folder: Flow Monitoring
+    interval: 10s
+    rules:
+
+      # ── DDoS: SYN flood ────────────────────────────────────────────────────
+      - uid: alert-ddos-synflood
+        title: "DDoS — SYN Flood Detected"
+        condition: C
+        for: 15s
+        noDataState: OK
+        execErrState: Error
+        annotations:
+          summary: "SYN flood in progress"
+          description: "More than 500 SYN-only flows in a 30s window. Likely DDoS."
+        labels:
+          severity: critical
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 30
+              to: 0
+            datasourceUid: influxdb-flows
+            queryType: flux
+            model:
+              refId: A
+              query: >
+                from(bucket: "flows")
+                  |> range(start: -30s)
+                  |> filter(fn: (r) => r._measurement == "flow" and r._field == "tcp_flags")
+                  |> filter(fn: (r) => r.ip_proto == "tcp" and r._value == 2)
+                  |> group()
+                  |> count()
+                  |> map(fn: (r) => ({_time: now(), _value: float(v: r._value)}))
+          - refId: C
+            relativeTimeRange:
+              from: 30
+              to: 0
+            datasourceUid: "__expr__"
+            model:
+              refId: C
+              type: classic_conditions
+              conditions:
+                - type: query
+                  evaluator:
+                    type: gt
+                    params: [500]
+                  operator:
+                    type: and
+                  query:
+                    params: [A]
+                  reducer:
+                    type: last
+                    params: []
+
+      # ── Port scan ──────────────────────────────────────────────────────────
+      - uid: alert-port-scan
+        title: "Recon — Port Scan Detected"
+        condition: C
+        for: 10s
+        noDataState: OK
+        execErrState: Error
+        annotations:
+          summary: "Port scan in progress"
+          description: "A single internal source generated more than 200 TCP flows in 1 minute — consistent with a port scan."
+        labels:
+          severity: warning
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 60
+              to: 0
+            datasourceUid: influxdb-flows
+            queryType: flux
+            model:
+              refId: A
+              query: >
+                from(bucket: "flows")
+                  |> range(start: -1m)
+                  |> filter(fn: (r) => r._measurement == "flow" and r._field == "packets")
+                  |> filter(fn: (r) => r.ip_proto == "tcp" and r.direction == "internal")
+                  |> group(columns: ["src_ip"])
+                  |> count()
+                  |> group()
+                  |> max()
+                  |> map(fn: (r) => ({_time: now(), _value: float(v: r._value)}))
+          - refId: C
+            relativeTimeRange:
+              from: 60
+              to: 0
+            datasourceUid: "__expr__"
+            model:
+              refId: C
+              type: classic_conditions
+              conditions:
+                - type: query
+                  evaluator:
+                    type: gt
+                    params: [200]
+                  operator:
+                    type: and
+                  query:
+                    params: [A]
+                  reducer:
+                    type: last
+                    params: []
+
+      # ── Bulk data transfer ─────────────────────────────────────────────────
+      - uid: alert-bulk-transfer
+        title: "Traffic — Bulk Data Transfer"
+        condition: C
+        for: 30s
+        noDataState: OK
+        execErrState: Error
+        annotations:
+          summary: "Bulk transfer threshold exceeded"
+          description: "Total traffic exceeded 10 MB in a 30s window."
+        labels:
+          severity: warning
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 30
+              to: 0
+            datasourceUid: influxdb-flows
+            queryType: flux
+            model:
+              refId: A
+              query: >
+                from(bucket: "flows")
+                  |> range(start: -30s)
+                  |> filter(fn: (r) => r._measurement == "flow" and r._field == "bytes")
+                  |> group()
+                  |> sum()
+                  |> map(fn: (r) => ({_time: now(), _value: float(v: r._value)}))
+          - refId: C
+            relativeTimeRange:
+              from: 30
+              to: 0
+            datasourceUid: "__expr__"
+            model:
+              refId: C
+              type: classic_conditions
+              conditions:
+                - type: query
+                  evaluator:
+                    type: gt
+                    params: [10000000]
+                  operator:
+                    type: and
+                  query:
+                    params: [A]
+                  reducer:
+                    type: last
+                    params: []
+
+      # ── CPU overload ──────────────────────────────────────────────────────
+      # Window is 5 min (not 1 min) because cpu_load is stamped at flow creation
+      # and the flow must still hit its inactive timeout before reaching InfluxDB.
+      - uid: alert-cpu-overload
+        title: "Device — CPU Overload"
+        condition: C
+        for: 0s
+        noDataState: OK
+        execErrState: Error
+        annotations:
+          summary: "Agent CPU utilisation critically high"
+          description: "The monitoring agent's CPU load exceeded 85 % — stamped into IPFIX flows. Possible CPU overload attack or runaway process."
+        labels:
+          severity: warning
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 300
+              to: 0
+            datasourceUid: influxdb-flows
+            queryType: flux
+            model:
+              refId: A
+              query: >
+                from(bucket: "flows")
+                  |> range(start: -5m)
+                  |> filter(fn: (r) => r._measurement == "flow" and r._field == "cpu_load"
+                      and r.protocol == "ipfix" and r._value != 0)
+                  |> group()
+                  |> max()
+                  |> map(fn: (r) => ({_time: now(), _value: float(v: r._value)}))
+          - refId: C
+            relativeTimeRange:
+              from: 300
+              to: 0
+            datasourceUid: "__expr__"
+            model:
+              refId: C
+              type: classic_conditions
+              conditions:
+                - type: query
+                  evaluator:
+                    type: gt
+                    params: [85]
+                  operator:
+                    type: and
+                  query:
+                    params: [A]
+                  reducer:
+                    type: last
+                    params: []
+
+      # ── Device offline (sensor only) ───────────────────────────────────────
+      # Scoped to category = 'SENSOR' — sensors send traffic every 60-180s so
+      # 5 min silence is genuinely abnormal. Workstations/VoIP/SSH naturally
+      # go quiet for much longer and would cause constant false positives.
+      - uid: alert-device-offline
+        title: "Device — Sensor Offline"
+        condition: C
+        for: 0s
+        noDataState: OK
+        execErrState: Error
+        annotations:
+          summary: "Sensor device has gone offline"
+          description: "A sensor device has not appeared in any flow for more than 5 minutes — possible port disconnection or device failure."
+        labels:
+          severity: warning
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 300
+              to: 0
+            datasourceUid: postgres-cmdb
+            model:
+              refId: A
+              rawSql: "SELECT NOW() AS time, COUNT(*) AS value FROM assets WHERE category = 'SENSOR' AND last_seen < NOW() - INTERVAL '5 minutes' AND last_seen > NOW() - INTERVAL '2 hours'"
+              format: time_series
+          - refId: C
+            relativeTimeRange:
+              from: 300
+              to: 0
+            datasourceUid: "__expr__"
+            model:
+              refId: C
+              type: classic_conditions
+              conditions:
+                - type: query
+                  evaluator:
+                    type: gt
+                    params: [0]
+                  operator:
+                    type: and
+                  query:
+                    params: [A]
+                  reducer:
+                    type: last
+                    params: []
+
+      # ── Lateral movement ──────────────────────────────────────────────────
+      - uid: alert-lateral-movement
+        title: "Security — Lateral Movement Detected"
+        condition: C
+        for: 0s
+        noDataState: OK
+        execErrState: Error
+        annotations:
+          summary: "Lateral movement in the network"
+          description: "A host contacted 8+ distinct internal systems in 5 minutes — possible post-compromise reconnaissance or malware spreading."
+        labels:
+          severity: critical
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 60
+              to: 0
+            datasourceUid: postgres-cmdb
+            model:
+              refId: A
+              rawSql: "SELECT NOW() AS time, COUNT(*) AS value FROM alerts WHERE alert_type = 'LATERAL_MOVEMENT' AND time > NOW() - INTERVAL '60 seconds'"
+              format: time_series
+          - refId: C
+            relativeTimeRange:
+              from: 60
+              to: 0
+            datasourceUid: "__expr__"
+            model:
+              refId: C
+              type: classic_conditions
+              conditions:
+                - type: query
+                  evaluator:
+                    type: gt
+                    params: [0]
+                  operator:
+                    type: and
+                  query:
+                    params: [A]
+                  reducer:
+                    type: last
+                    params: []
+

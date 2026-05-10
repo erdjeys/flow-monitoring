@@ -1,0 +1,244 @@
+{
+  "title": "Network Flow Monitoring",
+  "uid": "flow-monitor-main",
+  "version": 2,
+  "schemaVersion": 38,
+  "refresh": "10s",
+  "time": { "from": "now-30m", "to": "now" },
+  "templating": { "list": [] },
+  "annotations": {
+    "list": [
+      {
+        "builtIn": 1,
+        "datasource": { "type": "grafana", "uid": "-- Grafana --" },
+        "enable": true,
+        "hide": false,
+        "iconColor": "red",
+        "name": "Alerts",
+        "type": "dashboard"
+      }
+    ]
+  },
+  "panels": [
+    {
+      "id": 1,
+      "title": "Packets Per Second",
+      "type": "timeseries",
+      "gridPos": { "x": 0, "y": 0, "w": 12, "h": 8 },
+      "targets": [
+        {
+          "datasource": { "type": "influxdb", "uid": "influxdb-flows" },
+          "refId": "A",
+          "query": "from(bucket: \"flows\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"flow\" and r._field == \"packets\")\n  |> group(columns: [\"protocol\"])\n  |> aggregateWindow(every: 10s, fn: sum, createEmpty: false)\n  |> map(fn: (r) => ({r with _value: float(v: r._value) / 10.0}))"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "pps", "custom": { "lineWidth": 2 } } }
+    },
+    {
+      "id": 2,
+      "title": "Throughput (Bytes/s)",
+      "type": "timeseries",
+      "gridPos": { "x": 12, "y": 0, "w": 12, "h": 8 },
+      "targets": [
+        {
+          "datasource": { "type": "influxdb", "uid": "influxdb-flows" },
+          "refId": "A",
+          "query": "from(bucket: \"flows\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"flow\" and r._field == \"bytes\")\n  |> group(columns: [\"protocol\"])\n  |> aggregateWindow(every: 10s, fn: sum, createEmpty: false)\n  |> map(fn: (r) => ({r with _value: float(v: r._value) / 10.0}))"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "Bps" } }
+    },
+    {
+      "id": 3,
+      "title": "Flow Records (last 1 min)",
+      "type": "stat",
+      "gridPos": { "x": 0, "y": 8, "w": 6, "h": 4 },
+      "targets": [
+        {
+          "datasource": { "type": "influxdb", "uid": "influxdb-flows" },
+          "refId": "A",
+          "query": "from(bucket: \"flows\")\n  |> range(start: -1m)\n  |> filter(fn: (r) => r._measurement == \"flow\" and r._field == \"packets\")\n  |> group()\n  |> count()"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "thresholds": { "steps": [{ "color": "green", "value": 0 }, { "color": "yellow", "value": 1000 }, { "color": "red", "value": 5000 }] }
+        }
+      }
+    },
+    {
+      "id": 4,
+      "title": "Top Traffic Consumers by Bytes (last 5 min)",
+      "type": "table",
+      "gridPos": { "x": 6, "y": 8, "w": 12, "h": 8 },
+      "targets": [
+        {
+          "datasource": { "type": "influxdb", "uid": "influxdb-flows" },
+          "refId": "A",
+          "query": "from(bucket: \"flows\")\n  |> range(start: -5m)\n  |> filter(fn: (r) => r._measurement == \"flow\" and r._field == \"bytes\")\n  |> group(columns: [\"src_ip\"])\n  |> sum()\n  |> group()\n  |> sort(columns: [\"_value\"], desc: true)\n  |> limit(n: 15)\n  |> rename(columns: {_value: \"bytes_sent\", src_ip: \"source_ip\"})"
+        }
+      ],
+      "fieldConfig": {
+        "overrides": [
+          {
+            "matcher": { "id": "byName", "options": "bytes_sent" },
+            "properties": [
+              { "id": "unit", "value": "bytes" },
+              { "id": "custom.displayMode", "value": "lcd-gauge" },
+              { "id": "color", "value": { "mode": "thresholds" } },
+              { "id": "thresholds", "value": { "mode": "absolute", "steps": [
+                { "color": "green", "value": null },
+                { "color": "orange", "value": 1000000 },
+                { "color": "red", "value": 10000000 }
+              ]}}
+            ]
+          }
+        ]
+      },
+      "options": { "sortBy": [{ "displayName": "bytes_sent", "desc": true }] }
+    },
+
+    {
+      "id": 11,
+      "title": "Top Destinations by Bytes (last 5 min)",
+      "type": "table",
+      "gridPos": { "x": 18, "y": 8, "w": 6, "h": 8 },
+      "targets": [
+        {
+          "datasource": { "type": "influxdb", "uid": "influxdb-flows" },
+          "refId": "A",
+          "query": "from(bucket: \"flows\")\n  |> range(start: -5m)\n  |> filter(fn: (r) => r._measurement == \"flow\" and r._field == \"bytes\")\n  |> group(columns: [\"dst_ip\"])\n  |> sum()\n  |> group()\n  |> sort(columns: [\"_value\"], desc: true)\n  |> limit(n: 10)\n  |> rename(columns: {_value: \"bytes_recv\", dst_ip: \"dest_ip\"})"
+        }
+      ],
+      "fieldConfig": {
+        "overrides": [
+          { "matcher": { "id": "byName", "options": "bytes_recv" }, "properties": [{ "id": "unit", "value": "bytes" }] }
+        ]
+      }
+    },
+    {
+      "id": 5,
+      "title": "DDoS Detection — Total SYN Rate",
+      "type": "timeseries",
+      "gridPos": { "x": 0, "y": 16, "w": 12, "h": 8 },
+      "targets": [
+        {
+          "datasource": { "type": "influxdb", "uid": "influxdb-flows" },
+          "refId": "A",
+          "query": "from(bucket: \"flows\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"flow\" and r._field == \"tcp_flags\")\n  |> filter(fn: (r) => r.ip_proto == \"tcp\" and r._value == 2)\n  |> group()\n  |> aggregateWindow(every: 5s, fn: count, createEmpty: false)"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "color": { "mode": "thresholds" },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [{ "color": "green", "value": null }, { "color": "red", "value": 500 }]
+          },
+          "custom": { "lineWidth": 2, "thresholdsStyle": { "mode": "line+area" } }
+        }
+      }
+    },
+    {
+      "id": 6,
+      "title": "Port Scan Detection — TCP Flows per Source (last 1 min)",
+      "type": "table",
+      "gridPos": { "x": 12, "y": 16, "w": 12, "h": 8 },
+      "targets": [
+        {
+          "datasource": { "type": "influxdb", "uid": "influxdb-flows" },
+          "refId": "A",
+          "query": "from(bucket: \"flows\")\n  |> range(start: -1m)\n  |> filter(fn: (r) => r._measurement == \"flow\" and r._field == \"packets\")\n  |> filter(fn: (r) => r.ip_proto == \"tcp\" and r.direction == \"internal\")\n  |> group(columns: [\"src_ip\"])\n  |> count()\n  |> group()\n  |> sort(columns: [\"_value\"], desc: true)\n  |> limit(n: 20)\n  |> rename(columns: {_value: \"tcp_flows\"})"
+        }
+      ],
+      "fieldConfig": {
+        "overrides": [
+          {
+            "matcher": { "id": "byName", "options": "tcp_flows" },
+            "properties": [
+              { "id": "custom.displayMode", "value": "color-background" },
+              { "id": "thresholds", "value": { "mode": "absolute", "steps": [{ "color": "green", "value": null }, { "color": "orange", "value": 50 }, { "color": "red", "value": 200 }] } }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": 12,
+      "title": "Channel Utilization (% of 10 Mbps)",
+      "type": "gauge",
+      "gridPos": { "x": 0, "y": 24, "w": 6, "h": 6 },
+      "targets": [
+        {
+          "datasource": { "type": "influxdb", "uid": "influxdb-flows" },
+          "refId": "A",
+          "query": "from(bucket: \"flows\")\n  |> range(start: -10s)\n  |> filter(fn: (r) => r._measurement == \"flow\" and r._field == \"bytes\")\n  |> group()\n  |> sum()\n  |> map(fn: (r) => ({_time: now(), _value: float(v: r._value) / 10.0 / 1250000.0 * 100.0}))"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "min": 0,
+          "max": 100,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green",  "value": null },
+              { "color": "yellow", "value": 50 },
+              { "color": "orange", "value": 75 },
+              { "color": "red",    "value": 90 }
+            ]
+          }
+        }
+      },
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "showThresholdMarkers": true }
+    },
+
+    {
+      "id": 13,
+      "title": "Traffic by Collector Protocol (NetFlow / IPFIX / sFlow)",
+      "type": "piechart",
+      "gridPos": { "x": 6, "y": 24, "w": 9, "h": 6 },
+      "targets": [
+        {
+          "datasource": { "type": "influxdb", "uid": "influxdb-flows" },
+          "refId": "A",
+          "query": "from(bucket: \"flows\")\n  |> range(start: -5m)\n  |> filter(fn: (r) => r._measurement == \"flow\" and r._field == \"bytes\")\n  |> group(columns: [\"protocol\"])\n  |> sum()"
+        }
+      ],
+      "options": {
+        "pieType": "donut",
+        "displayLabels": ["name", "percent"]
+      }
+    },
+    {
+      "id": 8,
+      "title": "Traffic by Service",
+      "type": "piechart",
+      "gridPos": { "x": 15, "y": 24, "w": 9, "h": 6 },
+      "targets": [
+        {
+          "datasource": { "type": "influxdb", "uid": "influxdb-flows" },
+          "refId": "A",
+          "query": "from(bucket: \"flows\")\n  |> range(start: -5m)\n  |> filter(fn: (r) => r._measurement == \"flow\" and r._field == \"bytes\")\n  |> group(columns: [\"service\"])\n  |> sum()"
+        }
+      ]
+    },
+    {
+      "id": 9,
+      "title": "Traffic by Direction",
+      "type": "timeseries",
+      "gridPos": { "x": 0, "y": 30, "w": 24, "h": 6 },
+      "targets": [
+        {
+          "datasource": { "type": "influxdb", "uid": "influxdb-flows" },
+          "refId": "A",
+          "query": "from(bucket: \"flows\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"flow\" and r._field == \"bytes\")\n  |> group(columns: [\"direction\"])\n  |> aggregateWindow(every: 30s, fn: sum, createEmpty: false)"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "Bps" } }
+    }
+  ]
+}

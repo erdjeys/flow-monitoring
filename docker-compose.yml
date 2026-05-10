@@ -1,0 +1,255 @@
+
+#---------Networks ---------
+networks:
+  servers-net:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 10.0.1.0/24
+
+  sensors-net:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 10.0.2.0/24
+
+  mgmt-net:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 10.0.3.0/24
+
+#---------- Services ---------------
+services:
+
+  # --------------- Core router (connects all three segments) ------
+  router:
+    build: ./router
+    container_name: router
+    networks:
+      servers-net:
+        ipv4_address: 10.0.1.254
+      sensors-net:
+        ipv4_address: 10.0.2.254
+      mgmt-net:
+        ipv4_address: 10.0.3.254
+    cap_add:
+      - NET_ADMIN
+      - SYS_ADMIN
+    sysctls:
+      - net.ipv4.ip_forward=1
+    ports:
+      - "8090:8080"
+
+  #-------- Access switches -----------
+  switch-servers:
+    build: ./switch
+    container_name: switch-servers
+    networks:
+      servers-net:
+        ipv4_address: 10.0.1.2
+    environment:
+      - SWITCH_ID=SW-SERVERS
+      - SEGMENT=servers
+    ports:
+      - "8091:8080"
+    depends_on:
+      - router
+
+  switch-sensors:
+    build: ./switch
+    container_name: switch-sensors
+    networks:
+      sensors-net:
+        ipv4_address: 10.0.2.2
+    environment:
+      - SWITCH_ID=SW-SENSORS
+      - SEGMENT=sensors
+    ports:
+      - "8092:8080"
+    depends_on:
+      - router
+
+  # ---------- Application server (servers-net) ---------
+  server:
+    build: ./server
+    container_name: server
+    networks:
+      servers-net:
+        ipv4_address: 10.0.1.10
+    environment:
+      - API_PORT=8080
+    ports:
+      - "8010:8080"
+    depends_on:
+      - switch-servers
+
+  # ------ GPS field sensor (sensors-net) --------
+  field-sensor:
+    build: ./field-device
+    container_name: field-sensor
+    networks:
+      sensors-net:
+        ipv4_address: 10.0.2.30
+    environment:
+      - DEVICE_ID=GPS-001
+      - DEVICE_TYPE=GPS
+      - API_PORT=9000
+      - SIGNAL_BASE=-65
+      - ENCRYPTION_STATUS=1
+      - SERVER_ADDR=http://10.0.1.10:8080
+    cap_add:
+      - NET_ADMIN
+    ports:
+      - "9000:9000"
+    depends_on:
+      - router
+      - switch-sensors
+      - server
+
+  #-------Traffic generator (dual-homed: servers + mgmt) ------
+  generator:
+    build: ./generator
+    container_name: generator
+    networks:
+      servers-net:
+        ipv4_address: 10.0.1.40
+      mgmt-net:
+        ipv4_address: 10.0.3.40
+    environment:
+      - COLLECTOR_ADDR=10.0.3.50:2055
+      - SERVER_ADDR=http://10.0.1.10:8080
+      - INTERFACE=eth0
+      - API_PORT=8081
+    cap_add:
+      - NET_ADMIN
+      - NET_RAW
+    ports:
+      - "8081:8081"
+    depends_on:
+      - server
+      - collector
+
+  # ------- Monitoring agent (dual-homed: sensors + mgmt) -------
+  agent:
+    build: ./agent
+    container_name: monitoring-agent
+    networks:
+      sensors-net:
+        ipv4_address: 10.0.2.20
+      mgmt-net:
+        ipv4_address: 10.0.3.20
+    environment:
+      - INTERFACE=eth0
+      - COLLECTOR_ADDR=10.0.3.50:2055
+      - IPFIX_ADDR=10.0.3.50:4739
+      - SFLOW_ADDR=10.0.3.50:6343
+      - IED_API=http://10.0.2.30:9000
+      - API_PORT=8080
+      - ACTIVE_TIMEOUT=60
+      - INACTIVE_TIMEOUT=15
+      - SFLOW_RATE=10
+      - MAX_FLOWS=100000
+      - AGG_MAX_RECORDS=200
+    cap_add:
+      - NET_ADMIN
+      - NET_RAW
+    ports:
+      - "8080:8080"
+    depends_on:
+      - collector
+      - field-sensor
+
+  # ------ Flow pipeline (mgmt-net) ---------
+  collector:
+    build: ./collector
+    container_name: flow-collector
+    networks:
+      mgmt-net:
+        ipv4_address: 10.0.3.50
+    ports:
+      - "2055:2055/udp"
+      - "4739:4739/udp"
+      - "6343:6343/udp"
+      - "8079:8079"
+    environment:
+      - NETFLOW_PORT=2055
+      - IPFIX_PORT=4739
+      - SFLOW_PORT=6343
+      - INFLUXDB_URL=http://10.0.3.60:8086
+      - INFLUXDB_TOKEN=flowmonitor-secret-token
+      - INFLUXDB_ORG=flowmonitor
+      - INFLUXDB_BUCKET=flows
+      - POSTGRES_DSN=postgres://cmdb:cmdb123@10.0.3.80:5432/cmdb?sslmode=disable
+      - AGENT_API=http://10.0.3.20:8080
+      - HTTP_PORT=8079
+    depends_on:
+      influxdb:
+        condition: service_started
+      postgres:
+        condition: service_healthy
+
+  influxdb:
+    image: influxdb:2.7
+    container_name: influxdb
+    networks:
+      mgmt-net:
+        ipv4_address: 10.0.3.60
+    ports:
+      - "8086:8086"
+    environment:
+      - DOCKER_INFLUXDB_INIT_MODE=setup
+      - DOCKER_INFLUXDB_INIT_USERNAME=admin
+      - DOCKER_INFLUXDB_INIT_PASSWORD=flowmonitor123
+      - DOCKER_INFLUXDB_INIT_ORG=flowmonitor
+      - DOCKER_INFLUXDB_INIT_BUCKET=flows
+      - DOCKER_INFLUXDB_INIT_ADMIN_TOKEN=flowmonitor-secret-token
+    volumes:
+      - influxdb_data:/var/lib/influxdb2
+
+  grafana:
+    image: grafana/grafana:10.2.0
+    container_name: grafana
+    networks:
+      mgmt-net:
+        ipv4_address: 10.0.3.70
+    ports:
+      - "3000:3000"
+    environment:
+      - GF_SECURITY_ADMIN_USER=admin
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+      - GF_INSTALL_PLUGINS=
+      - GF_UNIFIED_ALERTING_ENABLED=true
+      - GF_ALERTING_ENABLED=false
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./grafana/provisioning:/etc/grafana/provisioning
+      - ./grafana/dashboards:/var/lib/grafana/dashboards
+    depends_on:
+      - influxdb
+      - postgres
+
+  postgres:
+    image: postgres:15-alpine
+    container_name: cmdb-postgres
+    networks:
+      mgmt-net:
+        ipv4_address: 10.0.3.80
+    ports:
+      - "5432:5432"
+    environment:
+      - POSTGRES_DB=cmdb
+      - POSTGRES_USER=cmdb
+      - POSTGRES_PASSWORD=cmdb123
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U cmdb -d cmdb"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  influxdb_data:
+  grafana_data:
+  postgres_data:
